@@ -56,6 +56,14 @@ fn channel_name(stats: Option<Stats>, metric: Metric) -> String {
             Some(s) => format!("🟢 Online: {}", s.online),
             None => "🟡 Online: unavailable".into(),
         },
+        Metric::Matches => match stats.and_then(|s| s.matches) {
+            Some(n) => format!("🎮 Matches: {n}"),
+            None => "🎮 Matches: unavailable".into(),
+        },
+        Metric::Queued => match stats.and_then(|s| s.queued) {
+            Some(n) => format!("⏳ Queued: {n}"),
+            None => "⏳ Queued: unavailable".into(),
+        },
     }
 }
 impl Counter {
@@ -141,12 +149,50 @@ mod tests {
             channel_name(
                 Some(Stats {
                     online: 0,
-                    registered: Some(30)
+                    registered: Some(30),
+                    matches: None,
+                    queued: None,
                 }),
                 Metric::Online
             ),
             "🟢 Online: 0"
         );
         assert_eq!(channel_name(None, Metric::Online), "🟡 Online: unavailable");
+    }
+
+    #[test]
+    fn new_counters_distinguish_counts_missing_fields_and_outages() {
+        for (matches, queued) in [(2, 1), (0, 0)] {
+            let stats = Some(Stats {
+                online: 14,
+                registered: Some(72),
+                matches: Some(matches),
+                queued: Some(queued),
+            });
+            assert_eq!(
+                channel_name(stats, Metric::Matches),
+                format!("🎮 Matches: {matches}")
+            );
+            assert_eq!(
+                channel_name(stats, Metric::Queued),
+                format!("⏳ Queued: {queued}")
+            );
+        }
+        let missing = Some(Stats {
+            online: 0,
+            registered: None,
+            matches: None,
+            queued: None,
+        });
+        for stats in [missing, None] {
+            assert_eq!(
+                channel_name(stats, Metric::Matches),
+                "🎮 Matches: unavailable"
+            );
+            assert_eq!(
+                channel_name(stats, Metric::Queued),
+                "⏳ Queued: unavailable"
+            );
+        }
     }
 }

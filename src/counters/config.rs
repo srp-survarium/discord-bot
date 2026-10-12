@@ -7,20 +7,33 @@ use serenity::all::ChannelId;
 pub enum Metric {
     Online,
     Registered,
+    Matches,
+    Queued,
 }
 
 pub struct Targets(Vec<(ChannelId, Metric)>);
 impl Targets {
-    pub fn parse(online: Option<ChannelId>, registered: Option<ChannelId>) -> ConfigResult<Self> {
-        if online.is_some() && online == registered {
-            return Err("Counters must use different channels".into());
+    pub fn parse(
+        online: Option<ChannelId>,
+        registered: Option<ChannelId>,
+        matches: Option<ChannelId>,
+        queued: Option<ChannelId>,
+    ) -> ConfigResult<Self> {
+        let entries: Vec<_> = [
+            (online, Metric::Online),
+            (registered, Metric::Registered),
+            (matches, Metric::Matches),
+            (queued, Metric::Queued),
+        ]
+        .into_iter()
+        .filter_map(|(id, metric)| id.map(|id| (id, metric)))
+        .collect();
+        for (i, (id, _)) in entries.iter().enumerate() {
+            if entries[..i].iter().any(|(other, _)| other == id) {
+                return Err("Counters must use different channels".into());
+            }
         }
-        Ok(Self(
-            [(online, Metric::Online), (registered, Metric::Registered)]
-                .into_iter()
-                .filter_map(|(id, metric)| id.map(|id| (id, metric)))
-                .collect(),
-        ))
+        Ok(Self(entries))
     }
     pub fn into_entries(self) -> impl Iterator<Item = (ChannelId, Metric)> {
         self.0.into_iter()
@@ -40,15 +53,18 @@ impl Config {
     ) -> ConfigResult<Option<Self>> {
         let online = env.optional("DISCORD_ONLINE_CHANNEL_ID")?;
         let registered = env.optional("DISCORD_REGISTERED_CHANNEL_ID")?;
+        let matches = env.optional("DISCORD_MATCHES_CHANNEL_ID")?;
+        let queued = env.optional("DISCORD_QUEUED_CHANNEL_ID")?;
+        let targets = Targets::parse(online, registered, matches, queued)?;
         let Some(endpoint) = env.optional::<Endpoint>("SRP_ONLINE_URL")? else {
-            if online.is_some() || registered.is_some() {
+            if targets.ids().next().is_some() {
                 return Err("Counter channels require SRP_ONLINE_URL".into());
             }
             return Ok(None);
         };
         let interval = env
             .value("SRP_POLL_SECONDS")
-            .unwrap_or_else(|| "60".into())
+            .unwrap_or_else(|| "10".into())
             .parse()?;
         let format = env
             .value("SRP_SOURCE_FORMAT")
@@ -59,7 +75,7 @@ impl Config {
         Ok(Some(Self {
             source,
             interval,
-            targets: Targets::parse(online, registered)?,
+            targets,
         }))
     }
 }
@@ -68,8 +84,48 @@ mod tests {
     use super::*;
     #[test]
     fn duplicate_counter_targets_are_rejected() {
-        let id = ChannelId::new(1);
-        assert!(Targets::parse(Some(id), Some(id)).is_err());
-        assert!(Targets::parse(Some(id), None).is_ok());
+        for first in 0..4 {
+            for second in first + 1..4 {
+                let mut ids = [None; 4];
+                ids[first] = Some(ChannelId::new(1));
+                ids[second] = ids[first];
+                assert!(Targets::parse(ids[0], ids[1], ids[2], ids[3]).is_err());
+            }
+        }
+        let ids = [1, 2, 3, 4].map(|id| Some(ChannelId::new(id)));
+        let targets = Targets::parse(ids[0], ids[1], ids[2], ids[3]).unwrap();
+        assert_eq!(targets.ids().count(), 4);
+        assert_eq!(
+            targets
+                .into_entries()
+                .map(|(_, metric)| metric)
+                .collect::<Vec<_>>(),
+            [
+                Metric::Online,
+                Metric::Registered,
+                Metric::Matches,
+                Metric::Queued
+            ]
+        );
+        assert!(Targets::parse(None, None, Some(ChannelId::new(1)), None).is_ok());
+    }
+
+    #[test]
+    fn new_counters_require_a_source_and_default_to_ten_second_polling() {
+        for key in ["DISCORD_MATCHES_CHANNEL_ID", "DISCORD_QUEUED_CHANNEL_ID"] {
+            let env = Environment::new(|name| (name == key).then(|| "42".into()));
+            assert!(Config::parse(&env).is_err());
+            let env = Environment::new(|name| match name {
+                "SRP_ONLINE_URL" => Some("https://example.com/api/stats".into()),
+                name if name == key => Some("42".into()),
+                _ => None,
+            });
+            let config = Config::parse(&env).unwrap().unwrap();
+            assert_eq!(config.interval.duration().as_secs(), 10);
+            assert_eq!(
+                config.targets.ids().collect::<Vec<_>>(),
+                [ChannelId::new(42)]
+            );
+        }
     }
 }

@@ -16,6 +16,9 @@ module, parsing its configuration, and forwarding the events it needs.
 | `counters/source` | Endpoint/poll interval types and JSON/HTML adapters |
 | `counters/channels` | Renaming and rate-limit cooldown state |
 | `counters` | Polling, source snapshots, and presence updates |
+| `moderation/config` | Optional guild and removable moderation-role configuration |
+| `moderation/window` | Distinct-person rolling day, hour and burst limits |
+| `moderation` | Audit pagination, permission checks, role removal and retry lifecycle |
 
 ## Parse at boundaries
 
@@ -64,3 +67,12 @@ it is not a transaction with Discord.
 The room-operation mutex favors simple ownership rules over parallel throughput.
 A Discord rate-limit wait can delay other room operations. Counter requests run
 in separate tasks. Use one process; the state store is not a multi-process database.
+
+The moderation guard rereads the preceding 24 hours of attributed kick/ban audit
+entries instead of persisting a second event database. Its three windows share
+distinct targets per actor and ignore events outside their time bounds. A role
+removal is the durable suspension; the bot never re-grants roles. It refreshes
+permissions and hierarchy before removal and verifies the member afterward.
+Audit delivery and permission changes are still asynchronous, so this is damage
+limitation rather than a pre-action authorization gate. No code path changes the
+guarded role's permissions globally or removes other roles from the member.

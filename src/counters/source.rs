@@ -9,6 +9,8 @@ use serde::Deserialize;
 pub struct Stats {
     pub online: u64,
     pub registered: Option<u64>,
+    pub matches: Option<u64>,
+    pub queued: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -31,8 +33,9 @@ impl FromStr for Format {
 impl Format {
     fn decode(self, body: &[u8]) -> Result<Stats, &'static str> {
         match self {
-            Self::Json => serde_json::from_slice(body)
-                .map_err(|_| "online response must contain a nonnegative integer online count"),
+            Self::Json => serde_json::from_slice(body).map_err(
+                |_| "stats response requires an online count and nonnegative integer counters",
+            ),
             Self::Skhid => decode_page(body),
         }
     }
@@ -89,6 +92,8 @@ fn decode_page(body: &[u8]) -> Result<Stats, &'static str> {
     Ok(Stats {
         online: online.ok_or("status page has no players online counter; use ?lang=en")?,
         registered: Some(registered.ok_or("status page has no registered counter; use ?lang=en")?),
+        matches: None,
+        queued: None,
     })
 }
 
@@ -119,10 +124,10 @@ pub struct PollInterval(Duration);
 impl FromStr for PollInterval {
     type Err = &'static str;
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let seconds = raw.parse::<u64>().ok().filter(|s| (15..=86400).contains(s));
+        let seconds = raw.parse::<u64>().ok().filter(|s| (10..=86400).contains(s));
         seconds
             .map(|s| Self(Duration::from_secs(s)))
-            .ok_or("expected an integer from 15 to 86400")
+            .ok_or("expected an integer from 10 to 86400")
     }
 }
 impl PollInterval {
@@ -192,12 +197,19 @@ impl Source {
     }
 }
 
-pub fn activity_name(count: Option<u64>) -> String {
-    match count {
-        None => "Online count unavailable".into(),
-        Some(1) => "1 player online".into(),
-        Some(count) => format!("{count} players online"),
+pub fn activity_name(stats: Option<Stats>) -> String {
+    let Some(stats) = stats else {
+        return "Server stats unavailable".into();
+    };
+    let mut parts = vec![format!("{} online", stats.online)];
+    if let Some(matches) = stats.matches {
+        let label = if matches == 1 { "match" } else { "matches" };
+        parts.push(format!("{matches} {label}"));
     }
+    if let Some(queued) = stats.queued {
+        parts.push(format!("{queued} queued"));
+    }
+    parts.join(" · ")
 }
 
 #[cfg(test)]
@@ -207,6 +219,46 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    #[test]
+    fn activity_shows_live_counts_without_registered_or_invented_zeroes() {
+        let stats = Stats {
+            online: 9,
+            registered: Some(72),
+            matches: Some(2),
+            queued: Some(1),
+        };
+        assert_eq!(
+            activity_name(Some(stats)),
+            "9 online · 2 matches · 1 queued"
+        );
+        assert_eq!(
+            activity_name(Some(Stats {
+                matches: Some(1),
+                queued: Some(0),
+                ..stats
+            })),
+            "9 online · 1 match · 0 queued"
+        );
+        assert_eq!(
+            activity_name(Some(Stats {
+                online: 0,
+                matches: Some(0),
+                queued: Some(0),
+                ..stats
+            })),
+            "0 online · 0 matches · 0 queued"
+        );
+        assert_eq!(
+            activity_name(Some(Stats {
+                matches: None,
+                queued: None,
+                ..stats
+            })),
+            "9 online"
+        );
+        assert_eq!(activity_name(None), "Server stats unavailable");
+    }
 
     fn decode_count(body: &[u8]) -> Result<u64, &'static str> {
         Format::Json.decode(body).map(|stats| stats.online)
@@ -226,21 +278,27 @@ mod tests {
             Format::Skhid.decode(page.as_bytes()),
             Ok(Stats {
                 online: 0,
-                registered: Some(30)
+                registered: Some(30),
+                matches: None,
+                queued: None,
             })
         );
         assert_eq!(
             Format::Skhid.decode(include_bytes!("../../tests/fixtures/skhid-stats.html")),
             Ok(Stats {
                 online: 10,
-                registered: Some(30)
+                registered: Some(30),
+                matches: None,
+                queued: None,
             })
         );
         assert_eq!(
             Format::Json.decode(br#"{"online":4,"registered":12}"#),
             Ok(Stats {
                 online: 4,
-                registered: Some(12)
+                registered: Some(12),
+                matches: None,
+                queued: None,
             })
         );
     }
@@ -283,9 +341,13 @@ mod tests {
         ] {
             assert!(url.parse::<Endpoint>().is_err(), "{url}");
         }
-        for interval in ["0", "14", "NaN", "inf", "-1", "86401"] {
+        for interval in ["0", "9", "NaN", "inf", "-1", "86401"] {
             assert!(interval.parse::<PollInterval>().is_err());
         }
+        assert_eq!(
+            "10".parse::<PollInterval>().unwrap().duration(),
+            Duration::from_secs(10)
+        );
         assert_eq!(
             "30".parse::<PollInterval>().unwrap().duration(),
             Duration::from_secs(30)
@@ -303,6 +365,44 @@ mod tests {
             "not json",
         ] {
             assert!(decode_count(body.as_bytes()).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn optional_counters_are_not_zero_and_reject_invalid_numbers() {
+        let minimal = Format::Json.decode(br#"{"online":0}"#).unwrap();
+        assert_eq!(minimal.matches, None);
+        assert_eq!(minimal.queued, None);
+        for field in ["matches", "queued"] {
+            for invalid in ["-1", "1.5", "true", "\"2\"", "18446744073709551616"] {
+                let body = format!(r#"{{"online":0,"{field}":{invalid}}}"#);
+                assert!(Format::Json.decode(body.as_bytes()).is_err(), "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_reads_all_server_counters_and_zeroes() {
+        for (matches, queued) in [(2, 1), (0, 0)] {
+            let body =
+                format!(r#"{{"online":14,"registered":72,"matches":{matches},"queued":{queued}}}"#);
+            let (result, headers) = request_format(
+                "200 OK",
+                &body,
+                "Content-Type: application/json\r\n",
+                Format::Json,
+            )
+            .await;
+            assert_eq!(
+                result,
+                Ok(Stats {
+                    online: 14,
+                    registered: Some(72),
+                    matches: Some(matches),
+                    queued: Some(queued),
+                })
+            );
+            assert!(headers.contains("accept: application/json"));
         }
     }
 
@@ -393,7 +493,9 @@ mod tests {
             result,
             Ok(Stats {
                 online: 10,
-                registered: Some(30)
+                registered: Some(30),
+                matches: None,
+                queued: None,
             })
         );
         assert!(headers.contains("accept: text/html"));

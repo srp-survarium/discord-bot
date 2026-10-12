@@ -76,9 +76,7 @@ pub fn start(
             sender.send_replace(snapshot);
             if presence.changed(snapshot, reconnected) {
                 ctx.set_presence(
-                    Some(ActivityData::watching(activity_name(
-                        snapshot.stats().map(|s| s.online),
-                    ))),
+                    Some(ActivityData::watching(activity_name(snapshot.stats()))),
                     if matches!(snapshot, Snapshot::Available(_)) {
                         OnlineStatus::Online
                     } else {
@@ -101,6 +99,8 @@ mod tests {
         let zero = Snapshot::Available(Stats {
             online: 0,
             registered: None,
+            matches: None,
+            queued: None,
         });
         assert!(presence.changed(zero, false));
         assert!(!presence.changed(zero, false));
@@ -108,6 +108,23 @@ mod tests {
         assert!(!presence.changed(Snapshot::Unavailable, false));
         assert!(presence.changed(zero, false));
         assert!(presence.changed(zero, true));
-        assert_eq!(activity_name(Some(0)), "0 players online");
+        assert_eq!(activity_name(zero.stats()), "0 online");
+    }
+
+    #[test]
+    fn match_and_queue_changes_update_presence_without_an_online_change() {
+        let mut presence = Presence::default();
+        let mut stats = Stats {
+            online: 9,
+            registered: Some(72),
+            matches: Some(2),
+            queued: Some(0),
+        };
+        assert!(presence.changed(Snapshot::Available(stats), false));
+        stats.queued = Some(1);
+        assert!(presence.changed(Snapshot::Available(stats), false));
+        assert!(!presence.changed(Snapshot::Available(stats), false));
+        stats.matches = Some(3);
+        assert!(presence.changed(Snapshot::Available(stats), false));
     }
 }

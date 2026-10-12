@@ -2,7 +2,7 @@
 # Discord bot
 
 A Rust Discord bot with independent features for temporary voice rooms and
-optional website counters. Extracted from
+optional server-stat counters. Extracted from
 [srp-survarium/srp](https://github.com/srp-survarium/srp). GPL-3.0-or-later.
 
 ## Run locally
@@ -60,21 +60,34 @@ releases it from management. Existing channels and the entry channel are preserv
 
 ## Optional counters
 
-Set `SRP_ONLINE_URL` to enable polling. JSON sources return `{"online":12}` with
-an optional `registered` integer. For the Skhid English status page:
+Set `SRP_ONLINE_URL` to enable polling. For Skhid, use the public server API:
 
 ```dotenv
-SRP_ONLINE_URL='https://026g.skhid.link/?lang=en'
-SRP_SOURCE_FORMAT='skhid'
+SRP_ONLINE_URL='https://026g.skhid.link/api/stats'
+SRP_SOURCE_FORMAT='json'
+SRP_POLL_SECONDS=10
 ```
 
-The bot displays the count in its activity. Optionally set
-`DISCORD_ONLINE_CHANNEL_ID` and `DISCORD_REGISTERED_CHANNEL_ID` to two different
-voice channels to show sidebar counters. Give the bot **View Channel**,
+The endpoint returns `{"online":14,"registered":72,"matches":2,"queued":1}`.
+It needs no account token. The bot's activity shows `14 online · 2 matches · 1 queued`.
+It refreshes from each poll when counts change (every 10 seconds by default),
+independently of the channel rename cooldown. Registered accounts stay in the
+optional channel counter. If the source fails, the activity shows
+`Server stats unavailable`; missing optional fields are omitted from the activity.
+Each sidebar counter is optional; set its ID to a different voice channel:
+
+| Setting | Channel name |
+| --- | --- |
+| `DISCORD_ONLINE_CHANNEL_ID` | 🟢 Online: 14 |
+| `DISCORD_REGISTERED_CHANNEL_ID` | 👥 Registered: 72 |
+| `DISCORD_MATCHES_CHANNEL_ID` | 🎮 Matches: 2 |
+| `DISCORD_QUEUED_CHANNEL_ID` | ⏳ Queued: 1 |
+
+Give the bot **View Channel**,
 **Manage Channels**, and **Connect** on those channels. To make them labels, deny
 **Connect** for everyone and explicitly allow it for the bot.
 
-`SRP_POLL_SECONDS` defaults to 60 and accepts 15–86400. Channel renames are limited
+`SRP_POLL_SECONDS` defaults to 10 and accepts 10–86400. Channel renames are limited
 to once every five minutes per channel, only when changed. Failed polls show
 unavailable rather than zero. Remote sources must use HTTPS; local HTTP is allowed.
 Redirects are rejected and requests time out after five seconds. Set
@@ -84,9 +97,65 @@ Redirects are rejected and requests time out after five seconds. Set
 bash run.sh --check-source  # Fetch counts without connecting to Discord.
 ```
 
-The HTML adapter parses labelled stats and may need updating if the site changes.
+Other JSON sources must include `online`; `registered`, `matches`, and `queued`
+are optional. Counts must be nonnegative integers. Missing optional counts show
+unavailable, not zero. The legacy `skhid` HTML adapter remains available for older
+servers, but supplies only online and registered counts. Use JSON for the new counters.
 When the bot is offline, channel names retain their last values and room creation
 and cleanup stop.
+
+## Optional moderation guard
+
+Select the server and the moderation role the bot may remove:
+
+```dotenv
+DISCORD_GUARD_GUILD_ID='your-server-id'
+DISCORD_GUARD_ROLE_ID='moderation-role-id'
+```
+
+Give the bot **Manage Roles** and **View Audit Log**, and place its highest role
+above the guarded role. The guarded role must grant **Ban Members** or **Kick
+Members** and must not be an integration-managed role or `@everyone`. Leave both
+settings blank to disable this feature. Voice rooms and counters remain independent.
+
+The guard checks audit logs about every five seconds. It removes the configured
+role from the acting moderator on any threshold:
+
+- The **11th distinct person** kicked or banned within the preceding 60 minutes.
+- The **16th distinct person** kicked or banned within the preceding 24 hours.
+- The **3rd distinct person** kicked or banned within the preceding 30 seconds.
+
+Kicks and bans share each limit. Repeated actions against the same person count
+once per window. Ordinary departures, unbans and message events do not count.
+The daily limit is a rolling 24-hour window, with no reset at midnight.
+The server owner and the bot itself are excluded. Only the selected role is
+removed; unrelated roles remain. Role removal has an audit-log reason. Another
+role can still grant moderation powers, so avoid overlapping grants for protected
+moderators; the guard reports this case rather than removing unrelated roles.
+
+There is **no automatic restoration**, even after the window expires or the bot
+restarts. An owner/admin restores the role manually after investigating. A role
+restored while its holder still exceeds a limit will be removed again. Audit
+history supplies the rolling counts across restarts; no counter state file is
+needed. Failed removals are reported and retried after a one-minute backoff.
+
+```sh
+bash run.sh --check-guard  # Read-only permission, hierarchy and audit-access check.
+```
+
+This is reactive protection: actions already completed are not undone, and more
+actions can occur before Discord supplies the audit entries and the bot removes
+the role. It cannot protect the owner, run while the bot is offline, or overcome
+missing permissions. Scans have a 60-second timeout and a 100-page limit per action
+type; incomplete scans are reported and retried, and any breaches already found
+are acted on before a later page can fail. Permission/hierarchy failures are
+reported without stopping the other features.
+
+To restrict deletion of other people's messages, remove **Manage Messages** from
+moderator roles and channel/member overrides, and avoid **Administrator** grants.
+Native **Ban Members** access can still delete the banned person's recent message
+history. Preventing that requires routing bans through controlled bot commands
+that explicitly preserve messages; this guard does not provide those commands.
 
 ## Development
 

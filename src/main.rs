@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 mod config;
 mod counters;
+mod moderation;
 mod rooms;
 
 use config::{BotToken, Environment};
@@ -60,13 +61,15 @@ impl EventHandler for Handler {
 enum Command {
     Run,
     CheckSource,
+    CheckGuard,
 }
 impl Command {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, &'static str> {
         match args.collect::<Vec<_>>().as_slice() {
             [] => Ok(Self::Run),
             [arg] if arg == "--check-source" => Ok(Self::CheckSource),
-            _ => Err("Usage: discord-bot [--check-source]"),
+            [arg] if arg == "--check-guard" => Ok(Self::CheckGuard),
+            _ => Err("Usage: discord-bot [--check-source | --check-guard]"),
         }
     }
 }
@@ -82,9 +85,24 @@ async fn run() -> Result<(), String> {
         if let Some(registered) = stats.registered {
             println!("Registered: {registered}");
         }
+        if let Some(matches) = stats.matches {
+            println!("Matches: {matches}");
+        }
+        if let Some(queued) = stats.queued {
+            println!("Queued: {queued}");
+        }
         return Ok(());
     }
     let token: BotToken = env.required("DISCORD_BOT_TOKEN")?;
+    let guard = moderation::Config::parse(&env)?;
+    if matches!(command, Command::CheckGuard) {
+        let guard = guard.ok_or("Configure DISCORD_GUARD_GUILD_ID and DISCORD_GUARD_ROLE_ID")?;
+        moderation::check(&guard, &serenity::all::Http::new(token.expose())).await?;
+        println!(
+            "Moderation guard ready: 16 people per rolling 24 hours, 11 per hour or 3 per 30 seconds; manual restoration only"
+        );
+        return Ok(());
+    }
     let room_config = rooms::Config::parse(&env)?;
     if let (Some(counters), Some(rooms)) = (&counters, &room_config)
         && counters.targets.ids().any(|id| rooms.layout.reserved(id))
@@ -109,6 +127,9 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|_| "Could not initialize Discord; check the token and network access")?;
     let mut tasks = Vec::new();
+    if let Some(guard) = guard {
+        tasks.push(moderation::start(guard, client.http.clone()));
+    }
     if let Some(counters) = counters {
         tasks.extend(counters::start(
             counters,
