@@ -1,0 +1,6 @@
+.env
+.rooms.json
+.rooms.json.tmp
+/target/
+.env.*
+!.env.example
