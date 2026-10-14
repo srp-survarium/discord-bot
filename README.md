@@ -22,14 +22,39 @@ No privileged gateway intents are required. Keep the token in `.env`; never
 commit it. Leave a feature's settings blank to disable it.
 
 The bot runs while your PC is awake and connected. No incoming port or web server
-is needed. Ctrl+C or SIGTERM stops it. For background operation, point your service
-supervisor at `target/release/discord-bot`, set the working directory to this repo,
-and load `.env`. Run one instance per set of Discord channels and state file.
+is needed. Ctrl+C or SIGTERM stops it. For background operation, see
+[Run on a server](#run-on-a-server), or point your service supervisor at
+`target/release/discord-bot`, set the working directory to this repo, and load
+`.env`. Run one instance per set of Discord channels and state file.
 
 On NixOS, if `cc` is missing:
 
 ```sh
 nix-shell -p gcc --run 'bash run.sh'
+```
+
+## Run on a server
+
+`deploy/deploy.sh` runs the bot as a systemd service on any x86-64 Linux host
+you can reach as root over SSH. It needs Nix locally, not on the server. It
+builds the committed `HEAD` as a static binary (`deploy/static.nix`), so a
+NixOS-built `target/release` binary is never copied to another distribution.
+
+```sh
+deploy/deploy.sh --setup root@your-server  # First time: user, directories, unit, .env.
+deploy/deploy.sh root@your-server          # Later: rebuild, replace, restart.
+```
+
+`--setup` creates a `discord-bot` system user, installs
+[`deploy/discord-bot.service`](deploy/discord-bot.service) and copies `.env` to
+`/etc/discord-bot/env` (root-only). Repeat it after changing `.env` or the unit.
+The binary goes to `/opt/discord-bot` with the deployed commit in `revision`, and
+the working directory, holding `.rooms.json`, is `/var/lib/discord-bot`. When
+moving the bot, stop the old instance first and copy its `.rooms.json` there,
+owned by `discord-bot`. Uncommitted changes to tracked files stop the deploy.
+
+```sh
+ssh root@your-server journalctl -u discord-bot -f  # Follow the logs.
 ```
 
 ## Join-to-create voice rooms
