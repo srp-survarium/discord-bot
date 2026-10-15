@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Installed to /etc/systemd/system/ by deploy.sh --setup.
+[Unit]
+Description=Discord voice rooms and counters
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=discord-bot
+Group=discord-bot
+EnvironmentFile=/etc/discord-bot/env
+WorkingDirectory=/var/lib/discord-bot
+ExecStart=/opt/discord-bot/discord-bot
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/discord-bot
+
+[Install]
+WantedBy=multi-user.target
